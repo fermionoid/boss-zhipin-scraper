@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
-VERSION = "2026.09.01-16"
+VERSION = "2026.09.01-17"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / config.OUTPUT_DIR_NAME
@@ -1486,11 +1486,73 @@ async def run_and_exit(logger: logging.Logger, paths: dict[str, Path]) -> int:
     return code
 
 
+
+INSTALLER_URLS = (
+    "https://cdn.jsdelivr.net/gh/fermionoid/boss-zhipin-scraper@{tag}/bookmarklet/install.html",
+    "https://fastly.jsdelivr.net/gh/fermionoid/boss-zhipin-scraper@{tag}/bookmarklet/install.html",
+    "https://raw.githubusercontent.com/fermionoid/boss-zhipin-scraper/main/bookmarklet/install.html",
+)
+INSTALLER_TAG = "2026.09.01-17"
+
+
+def open_installer(logger: logging.Logger) -> bool:
+    """下载书签安装页并用默认浏览器打开。
+
+    调试器接管方案已被实验证实会被平台反自动化杀掉标签页，改用页面内脚本。
+    这里让用户双击原来的 bat 就能拿到新方案，不必再手动传文件。
+    """
+    import urllib.request
+
+    target = BASE_DIR / "收集器安装.html"
+    data = None
+    for template in INSTALLER_URLS:
+        try:
+            url = template.format(tag=INSTALLER_TAG)
+            with urllib.request.urlopen(url, timeout=15) as response:
+                body = response.read()
+            if body and len(body) > 2000:
+                data = body
+                break
+        except Exception:
+            continue
+    if data is None:
+        print("下载安装页失败，请检查网络后重试。")
+        logger.error("安装页下载失败")
+        return False
+    try:
+        target.write_bytes(data)
+    except Exception:
+        logger.exception("写入安装页失败")
+        return False
+
+    print("")
+    print("=" * 56)
+    print("  抓取方式已更换（旧方式被平台拦截，已废弃）")
+    print("=" * 56)
+    print("  已生成：收集器安装.html（就在本文件夹里，马上会自动打开）")
+    print("")
+    print("  接下来只需三步：")
+    print("   1) 在打开的网页里按 Ctrl+Shift+B 显示收藏栏")
+    print("   2) 把网页上那个绿色按钮【拖】到收藏栏（是拖，不是点）")
+    print("   3) 回到 Boss 沟通页，点收藏栏里的『收集候选人』→ 点开始")
+    print("")
+    print("  以后都不用再双击这个 bat 了。")
+    print("=" * 56)
+    try:
+        os.startfile(str(target))  # type: ignore[attr-defined]
+    except Exception:
+        logger.exception("自动打开失败")
+        print("  （没能自动打开，请手动双击本文件夹里的 收集器安装.html）")
+    return True
+
+
 def main() -> int:
     paths = ensure_output_dirs()
     logger = setup_logger()
     print(f"程序版本：{VERSION}")
     logger.info("程序版本 %s", VERSION)
+    open_installer(logger)
+    return 0
     try:
         return asyncio.run(run_and_exit(logger, paths))
     except KeyboardInterrupt:
