@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
-VERSION = "2026.09.01-14"
+VERSION = "2026.09.01-15"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / config.OUTPUT_DIR_NAME
@@ -1311,6 +1311,55 @@ async def url_watchdog(page: Any, logger: logging.Logger) -> None:
         await asyncio.sleep(1)
 
 
+
+def http_boss_targets() -> list[dict]:
+    """用纯 HTTP 列出 Boss 标签页。这个接口不会挂调试器，
+    因此可以在"未接管"状态下安全观察页面存活情况。"""
+    import json as _json
+    import urllib.request as _req
+
+    try:
+        url = config.CDP_ENDPOINT.rstrip("/") + "/json"
+        with _req.urlopen(url, timeout=5) as response:
+            targets = _json.loads(response.read())
+        return [
+            t
+            for t in targets
+            if t.get("type") == "page" and config.TARGET_DOMAIN in t.get("url", "")
+        ]
+    except Exception:
+        return []
+
+
+async def watch_targets(seconds: float, label: str, logger: logging.Logger) -> bool:
+    """观察若干秒，返回 Boss 页面是否全程存活。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    while loop.time() < deadline:
+        if not http_boss_targets():
+            logger.warning("存活观察[%s]：页面消失了", label)
+            return False
+        await asyncio.sleep(1)
+    logger.info("存活观察[%s]：%s 秒内页面一直在", label, seconds)
+    return True
+
+
+def announce_verdict(before: bool, after: bool, logger: logging.Logger) -> None:
+    if before and not after:
+        verdict = (
+            "结论：页面只在『被程序接管』之后消失。这是 Boss 的反自动化机制，"
+            "当前这套方案无法绕过。"
+        )
+    elif not before:
+        verdict = "结论：程序还没接管，页面就自己没了。问题不在程序，在浏览器或页面本身。"
+    else:
+        verdict = "结论：接管前后页面都活着。关页面另有原因，可继续排查抓取流程。"
+    print("\n" + "=" * 56)
+    print("  " + verdict)
+    print("=" * 56 + "\n")
+    logger.warning("存活实验 %s", verdict)
+
+
 async def run(logger: logging.Logger, paths: dict[str, Path]) -> int:
     try:
         from playwright.async_api import async_playwright
@@ -1324,6 +1373,11 @@ async def run(logger: logging.Logger, paths: dict[str, Path]) -> int:
     # 正在用的 Brave 一起关掉——这就是"跑完一次就得重新点 1 重登"的原因
     # （2026-09-01 实测）。这里手动 start()，且全程不调用 browser.close()/
     # playwright.stop()，退出时靠进程结束自然断开 websocket，浏览器不受影响。
+    # 接管前先观察页面能否自己活着——用于判定"页面被谁关掉"。
+    # 纯 HTTP 查询，不挂调试器，不影响页面。
+    print("检查页面状态（约 8 秒）……")
+    alive_before = await watch_targets(8, "接管前", logger)
+
     playwright = await async_playwright().start()
     try:
         if True:
@@ -1332,6 +1386,10 @@ async def run(logger: logging.Logger, paths: dict[str, Path]) -> int:
                 timeout=config.CDP_TIMEOUT_MS,
             )
             await log_all_pages(browser, logger)
+            # 接管后再观察同样长的时间，两相对比即可定性。
+            alive_after = await watch_targets(8, "接管后", logger)
+            if alive_before != alive_after or not alive_after:
+                announce_verdict(alive_before, alive_after, logger)
             page = await acquire_page(browser, logger)
             if page is None:
                 page = await find_target_page(browser)
