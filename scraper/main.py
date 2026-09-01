@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
-VERSION = "2026.09.01-18"
+VERSION = "2026.09.01-19"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / config.OUTPUT_DIR_NAME
@@ -1492,7 +1492,34 @@ INSTALLER_URLS = (
     "https://fastly.jsdelivr.net/gh/fermionoid/boss-zhipin-scraper@{tag}/bookmarklet/install.html",
     "https://raw.githubusercontent.com/fermionoid/boss-zhipin-scraper/main/bookmarklet/install.html",
 )
-INSTALLER_TAG = "2026.09.01-18"
+INSTALLER_TAG = "2026.09.01-19"
+
+
+
+def copy_bookmarklet(installer_html: bytes, logger: logging.Logger) -> bool:
+    """把安装页里的书签代码提取出来，放进 Windows 剪贴板。
+
+    拖拽到收藏栏对不熟悉浏览器的用户太难（实测卡住），粘贴更可靠。
+    """
+    try:
+        import html as html_mod
+        import re as re_mod
+        import subprocess
+        import urllib.parse
+
+        text = installer_html.decode("utf-8", "replace")
+        match = re_mod.search(r'href="(javascript:[^"]+)"', text)
+        if not match:
+            return False
+        url = html_mod.unescape(match.group(1))
+        # 还原成浏览器实际执行的形式，保证粘贴进书签栏可用
+        body = urllib.parse.unquote(url[len("javascript:") :])
+        payload = "javascript:" + urllib.parse.quote(body, safe="")
+        subprocess.run("clip", input=payload.encode("utf-16-le"), check=True)
+        return True
+    except Exception:
+        logger.exception("复制书签代码到剪贴板失败")
+        return False
 
 
 def open_installer(logger: logging.Logger) -> bool:
@@ -1525,19 +1552,27 @@ def open_installer(logger: logging.Logger) -> bool:
         logger.exception("写入安装页失败")
         return False
 
+    # 把书签代码放进剪贴板：拖拽对不熟悉的用户太难，粘贴更稳。
+    copied = copy_bookmarklet(data, logger)
+
     print("")
-    print("=" * 56)
+    print("=" * 60)
     print("  抓取方式已更换（旧方式被平台拦截，已废弃）")
-    print("=" * 56)
-    print("  已生成：收集器安装.html（就在本文件夹里，马上会自动打开）")
-    print("")
-    print("  接下来只需三步：")
-    print("   1) 在打开的网页里按 Ctrl+Shift+B 显示收藏栏")
-    print("   2) 把网页上那个绿色按钮【拖】到收藏栏（是拖，不是点）")
-    print("   3) 回到 Boss 沟通页，点收藏栏里的『收集候选人』→ 点开始")
-    print("")
-    print("  以后都不用再双击这个 bat 了。")
-    print("=" * 56)
+    print("=" * 60)
+    if copied:
+        print("  书签代码已经复制到剪贴板了，照下面做就行：")
+        print("")
+        print("   1) 切到 Brave 浏览器")
+        print("   2) 按 Ctrl+Shift+O  打开书签管理器")
+        print("   3) 右上角『⋮』→ 选『添加新书签』")
+        print("   4) 名称随便填，比如：收集候选人")
+        print("   5) 网址那一栏，按 Ctrl+V 粘贴（会是很长一串），保存")
+        print("   6) 按 Ctrl+Shift+B 显示收藏栏，就能看到这个书签了")
+        print("   7) 回到 Boss 沟通页，点这个书签 → 右下角点『开始』")
+    else:
+        print("  请在 Brave 里按 Ctrl+O 打开本文件夹的 收集器安装.html，")
+        print("  然后把页面上的绿色按钮拖到收藏栏（Ctrl+Shift+B 可显示收藏栏）。")
+    print("=" * 60)
     # 必须用 Brave 打开：书签要加在登录着 Boss 的那个浏览器里才有用，
     # 用系统默认浏览器（可能是 Chrome）打开等于白装。
     candidates = [
