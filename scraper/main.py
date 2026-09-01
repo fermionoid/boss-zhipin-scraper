@@ -562,23 +562,6 @@ async def dismiss_popups(page: Any, logger: logging.Logger) -> int:
     return clicked
 
 
-async def click_nav_chat(page: Any, logger: logging.Logger) -> bool:
-    """像人一样点左侧「沟通」菜单，把 SPA 切回聊天视图。
-    绝不用 goto 刷新——刷新会让 Boss 重新落回推荐/引导视图（2026-09-01 实测）。"""
-    try:
-        candidates = page.locator('text="沟通"')
-        count = await candidates.count()
-        for index in range(min(count, 5)):
-            candidate = candidates.nth(index)
-            if await candidate.is_visible():
-                await candidate.click(timeout=2000)
-                logger.info("点击左侧「沟通」菜单恢复聊天视图")
-                await asyncio.sleep(1.5)
-                return True
-    except Exception:
-        logger.exception("点击「沟通」菜单失败")
-    return False
-
 
 async def pick_live_page(browser: Any) -> Any | None:
     """按内容挑选真正渲染了会话列表的页面。
@@ -618,11 +601,10 @@ async def wait_for_page_ready(page: Any, logger: logging.Logger) -> bool:
         except Exception:
             pass
         polls += 1
-        # 列表不在 = 大概率被切到了推荐视图；像人一样点「沟通」菜单切回来。
+        # 只关弹窗、安静等待。实测点「沟通」菜单和 goto 刷新都回不到聊天视图，
+        # 反而会打断页面自己的恢复过程。
         if polls % 3 == 0:
             await dismiss_popups(page, logger)
-            if await click_nav_chat(page, logger):
-                print("已点击左侧「沟通」菜单，切回聊天视图……")
         if not announced:
             print("页面还在加载，等待中……（最长等 90 秒）")
             logger.info("等待沟通页渲染 url=%s", page.url)
@@ -631,19 +613,6 @@ async def wait_for_page_ready(page: Any, logger: logging.Logger) -> bool:
     logger.warning("等待页面就绪超时 url=%s", page.url)
     return False
 
-
-async def recover_to_chat(page: Any, chat_url: str, logger: logging.Logger) -> None:
-    """点击误触导航跳离沟通页后，先回退、回不来就直接跳回沟通页。"""
-    timeout_ms = int(config.NAVIGATION_RECOVERY_TIMEOUT_SECONDS * 1000)
-    try:
-        await page.go_back(timeout=timeout_ms)
-    except Exception:
-        logger.exception("go_back 失败，尝试直接跳回沟通页")
-    if config.CHAT_URL_FRAGMENT.casefold() not in page.url.casefold():
-        try:
-            await page.goto(chat_url, timeout=timeout_ms)
-        except Exception:
-            logger.exception("跳回沟通页失败 url=%s", page.url)
 
 
 async def right_panel_state(page: Any) -> tuple[Any | None, str]:
@@ -706,42 +675,80 @@ async def extract_selector_fields(right: Any, panel: Any | None) -> dict[str, st
     return fields
 
 
-async def item_is_active(locator: Any) -> bool:
-    class_value = normalize_space(await locator.get_attribute("class")).casefold()
-    class_parts = class_value.replace("_", "-").split()
-    for token in config.ACTIVE_CLASS_TOKENS:
-        normalized_token = token.casefold()
-        if any(part == normalized_token or part.endswith(f"-{normalized_token}") for part in class_parts):
-            return True
-    active_values = {value.casefold() for value in config.ACTIVE_STATE_VALUES}
-    for attribute in config.ACTIVE_STATE_ATTRIBUTES:
-        value = normalize_space(await locator.get_attribute(attribute)).casefold()
-        if value in active_values:
-            return True
-    return False
+
+ITEM_EXTRACT_JS = """
+(container, cfg) => {
+  const pick = (root, sels) => {
+    for (const s of sels) {
+      const el = root.querySelector(s);
+      if (el && el.offsetParent !== null) {
+        const t = (el.innerText || '').trim();
+        if (t) return t;
+      }
+    }
+    return '';
+  };
+  let items = [];
+  for (const s of cfg.itemSelectors) {
+    const found = Array.from(container.querySelectorAll(s.replace(/^:scope\\s*/, '')));
+    if (found.length) { items = found; break; }
+  }
+  return items.slice(0, 200).map(el => {
+    const attrs = {};
+    for (const a of cfg.keyAttributes) attrs[a] = (el.getAttribute(a) || '').trim();
+    return {
+      attrs,
+      raw_text: (el.innerText || '').trim(),
+      name: pick(el, cfg.nameSelectors),
+      job: pick(el, cfg.jobSelectors),
+      summary: pick(el, cfg.summarySelectors),
+      time: pick(el, cfg.timeSelectors),
+      cls: (el.getAttribute('class') || '') + ' ' +
+           cfg.stateAttributes.map(a => el.getAttribute(a) || '').join(' '),
+      visible: el.offsetParent !== null,
+    };
+  });
+}
+"""
 
 
 async def collect_visible_items(container: Any) -> list[dict[str, Any]]:
-    items_locator = await first_locator_group(container, "conversation_item")
-    if items_locator is None:
+    """一次 JS 调用把整个可见列表读回来。
+
+    绝对不要退回"逐元素、逐字段查询"的写法：40 个会话会产生 200+ 次
+    往返、耗时 40 秒以上，期间页面早已切换视图，后续点击必然落空
+    （2026-09-01 实测的真实故障）。
+    """
+    try:
+        raw_items = await container.evaluate(
+            ITEM_EXTRACT_JS,
+            {
+                "itemSelectors": list(config.SELECTORS["conversation_item"]),
+                "keyAttributes": list(config.KEY_ATTRIBUTES),
+                "nameSelectors": list(config.SELECTORS["item_name"]),
+                "jobSelectors": list(config.SELECTORS["item_job"]),
+                "summarySelectors": list(config.SELECTORS["item_summary"]),
+                "timeSelectors": list(config.SELECTORS["item_time"]),
+                "stateAttributes": list(config.ACTIVE_STATE_ATTRIBUTES),
+            },
+        )
+    except Exception:
         return []
 
     collected: list[dict[str, Any]] = []
-    count = await items_locator.count()
-    for index in range(min(count, 200)):
-        locator = items_locator.nth(index)
+    for entry in raw_items or []:
         try:
-            if not await locator.is_visible():
+            if not entry.get("visible"):
                 continue
-            raw_text = await locator_raw_text(locator)
-            attributes = {}
-            for attribute in config.KEY_ATTRIBUTES:
-                attributes[attribute] = normalize_space(await locator.get_attribute(attribute))
-
-            name = await first_text(locator, "item_name")
-            job = await first_text(locator, "item_job")
-            summary = await first_text(locator, "item_summary")
-            time_text = await first_text(locator, "item_time")
+            raw_text = entry.get("raw_text", "")
+            attributes = {
+                key: normalize_space(value)
+                for key, value in (entry.get("attrs") or {}).items()
+            }
+            name = normalize_space(entry.get("name", ""))
+            job = normalize_space(entry.get("job", ""))
+            summary = normalize_space(entry.get("summary", ""))
+            time_text = normalize_space(entry.get("time", ""))
             lines = [normalize_space(line) for line in raw_text.splitlines() if normalize_space(line)]
             if not name and lines:
                 name = lines[0]
@@ -752,21 +759,48 @@ async def collect_visible_items(container: Any) -> list[dict[str, Any]]:
             if not time_text:
                 time_text = regex_value("last_message_time", raw_text)
 
+            class_blob = normalize_space(entry.get("cls", "")).casefold()
+            class_parts = class_blob.replace("_", "-").split()
+            was_active = any(
+                part == token.casefold() or part.endswith(f"-{token.casefold()}")
+                for token in config.ACTIVE_CLASS_TOKENS
+                for part in class_parts
+            ) or any(
+                value.casefold() in class_parts
+                for value in config.ACTIVE_STATE_VALUES
+            )
+
             collected.append(
                 {
                     "key": make_conversation_key(attributes, name, job, summary),
+                    "attrs": attributes,
                     "name": name,
                     "job": job,
                     "summary": summary,
                     "time": time_text,
                     "raw_text": raw_text,
-                    "was_active": await item_is_active(locator),
-                    "locator": locator,
+                    "was_active": was_active,
                 }
             )
         except Exception:
             continue
     return collected
+
+
+async def locate_item(container: Any, item: dict[str, Any]) -> Any | None:
+    """点击前用属性重新定位元素。列表随时会重建，收集时的 locator 会失效，
+    必须临用临取（2026-09-01 实测：陈旧 locator 导致每个人都点击超时）。"""
+    for attribute in config.KEY_ATTRIBUTES:
+        value = (item.get("attrs") or {}).get(attribute, "")
+        if not value:
+            continue
+        try:
+            candidate = container.locator(f'[{attribute}="{value}"]').first
+            if await candidate.count() and await candidate.is_visible():
+                return candidate
+        except Exception:
+            continue
+    return None
 
 
 async def process_item(
@@ -776,18 +810,26 @@ async def process_item(
     paths: dict[str, Path],
     chat_url: str,
     logger: logging.Logger,
+    container: Any = None,
 ) -> tuple[str, dict[str, Any] | None]:
     previous_right, previous_right_text = await right_panel_state(page)
     previous_panel, _ = await candidate_panel_state(page, previous_right)
     previous_text = await locator_raw_text(previous_panel) if previous_panel is not None else ""
-    await item["locator"].scroll_into_view_if_needed(timeout=config.CLICK_TIMEOUT_MS)
-    await item["locator"].click(timeout=config.CLICK_TIMEOUT_MS)
-    # 保险丝：点到导航类元素会跳离沟通页，立即恢复并把该项按导航跳过。
-    await asyncio.sleep(0.5)
-    if config.CHAT_URL_FRAGMENT.casefold() not in page.url.casefold():
-        logger.warning("点击后跳离沟通页 url=%s name=%s，回退恢复", page.url, item.get("name", ""))
-        await recover_to_chat(page, chat_url, logger)
-        return "skipped_nav", None
+
+    target = None
+    if container is not None:
+        target = await locate_item(container, item)
+    if target is None:
+        return "vanished", None
+    try:
+        await target.click(timeout=config.CLICK_TIMEOUT_MS)
+    except Exception:
+        # 常规点击会等元素"稳定"，列表在重排时会一直等到超时；
+        # 退化为 JS 直接派发点击，不做可交互性检查。
+        try:
+            await target.evaluate("el => el.click()")
+        except Exception:
+            return "vanished", None
     state = await wait_for_candidate_render(page, previous_text)
 
     right = state["right"]
@@ -941,13 +983,12 @@ async def scrape_page(
         await dismiss_popups(page, logger)
         container = await find_conversation_list(page)
         if container is None:
-            # 列表暂时消失：先关弹窗、再全量重扫标签页（可能连错了僵尸目标），
-            # goto 拉回只作最后一搏——它会整页刷新，能不用就不用。
-            for attempt in range(config.NO_LIST_RETRY):
+            # 列表暂时消失就安静地等它自己回来。
+            # 实测结论（2026-09-01）：goto 刷新会把页面重置、点「沟通」菜单
+            # 回不到聊天视图，两者都只会让情况更糟，一律不再使用。
+            for _ in range(config.NO_LIST_RETRY):
+                await asyncio.sleep(config.NO_LIST_RETRY_WAIT)
                 await dismiss_popups(page, logger)
-                # 首选恢复手段：点左侧「沟通」菜单（SPA 内切换，不刷新页面）。
-                if await click_nav_chat(page, logger):
-                    print("视图被切走了，已点「沟通」菜单切回……")
                 container = await find_conversation_list(page)
                 if container is not None:
                     break
@@ -960,7 +1001,6 @@ async def scrape_page(
                         container = await find_conversation_list(page)
                         if container is not None:
                             break
-                await asyncio.sleep(config.NO_LIST_RETRY_WAIT)
         if container is None:
             await dump_debug_page(page, paths, logger, tag="no_list")
             raise ConversationListNotFoundError(
@@ -1020,7 +1060,11 @@ async def scrape_page(
                         paths,
                         chat_url,
                         logger,
+                        container=container,
                     )
+                    if status == "vanished":
+                        # 列表刚好重建，元素没了：不算失败，下一轮重新收集即可。
+                        raise LookupError("会话项已失效，稍后重试")
                     final_error = None
                     break
                 except Exception as error:
