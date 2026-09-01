@@ -20,10 +20,14 @@
     jobSel: [".source-job", "[class*='source-job']"],
     sumSel: [".push-text", "[class*='push-text']"],
     timeSel: [".time", "[class*='time']"],
+    /* 右侧整块。顶部那行"29岁 本科 期望…"不一定在 chat-conversation 里，
+       所以从大往小找，谁的文字里有候选人信息就用谁。 */
     panelSel: [
-      ".chat-conversation",
       "[class*='chat-conversation']",
       "[class*='conversation-main']",
+      "[class*='chat-content']",
+      "[class*='geek-card']",
+      "[class*='resume']",
     ],
     minWait: 1200,
     maxWait: 2600,
@@ -107,7 +111,7 @@
     "background:#fff;border:1px solid #d8dde6;border-radius:10px;padding:14px;" +
     "box-shadow:0 8px 28px rgba(0,0,0,.18);font:13px/1.6 system-ui,sans-serif;color:#1b2733";
   box.innerHTML =
-    '<div style="font-weight:600;margin-bottom:8px">候选人收集器</div>' +
+    '<div style="font-weight:600;margin-bottom:8px">候选人收集器 <span style="font-weight:400;color:#8b97a6;font-size:11px">v2</span></div>' +
     '<div id="bp-msg" style="min-height:44px;color:#4a5866">准备就绪。请确认左侧能看到候选人列表。</div>' +
     '<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">' +
     '<button id="bp-go" style="flex:1;padding:7px 0;border:0;border-radius:6px;background:#00bebd;color:#fff;font-weight:600;cursor:pointer">开始</button>' +
@@ -144,8 +148,15 @@
   }
 
   function panelText() {
-    var p = q(document, CFG.panelSel);
-    return p ? (p.innerText || "").trim() : "";
+    var parts = [];
+    for (var i = 0; i < CFG.panelSel.length; i++) {
+      var els = document.querySelectorAll(CFG.panelSel[i]);
+      for (var j = 0; j < els.length && j < 3; j++) {
+        var t = (els[j].innerText || "").trim();
+        if (t && parts.indexOf(t) === -1) parts.push(t);
+      }
+    }
+    return parts.join("\n");
   }
 
   function parsePanel(t) {
@@ -173,7 +184,8 @@
       var left = pm[1].trim();
       if (/(大学|学院|学校)$/.test(left)) continue;   // 教育经历行，跳过
       if (/^(期望|沟通职位)/.test(left)) continue;     // 期望行，跳过
-      r["最近公司"] = left;
+      /* 行首常带"2024.05-至今"这类日期，去掉后才是公司名 */
+      r["最近公司"] = left.replace(/^\s*\d{4}[.\-/年]?\d{0,2}(?:\s*[-–—]\s*|\s*至\s*)(?:至今|今|\d{4}[.\-/年]?\d{0,2})?\s*/, "").trim();
       r["最近职位"] = pm[2].trim().split(/\s*[·・|]\s*/)[0];
       break;
     }
@@ -193,11 +205,15 @@
     return "";
   }
 
-  async function waitPanel(prev) {
+  async function waitPanel(prev, name) {
+    /* 判据是"面板里出现了这个人的名字"。
+       不能用"文字变了"：当前已选中的那个人点了不会变，会被误判成失败
+       （2026-09-01 实测第一个人永远抓不到）。 */
     var t0 = Date.now();
     while (Date.now() - t0 < CFG.renderTimeout) {
       var t = panelText();
-      if (t && t !== prev && t.length > 20) return t;
+      if (t && name && t.indexOf(name) !== -1 && t.length > 20) return t;
+      if (t && !name && t !== prev) return t;
       await sleep(250);
     }
     return panelText();
@@ -211,8 +227,8 @@
 
     el.scrollIntoView({ block: "center" });
     el.click();
-    var t = await waitPanel(prev);
-    if (!t || t === prev) return null;
+    var t = await waitPanel(prev, name);
+    if (!t) return null;
 
     var row = parsePanel(t);
     row["姓名"] = name || "";
@@ -240,6 +256,7 @@
         var k = keyOf(next);
         seen[k] = 1;
         try {
+          say("正在读取：" + (txt(q(next, CFG.nameSel)) || "?") + "（已收集 " + rows.length + " 人）");
           var row = await grabOne(next);
           if (row && row["姓名"]) {
             row.__key = k;
