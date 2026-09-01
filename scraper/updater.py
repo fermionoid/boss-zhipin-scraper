@@ -27,6 +27,7 @@ MIRRORS = (
 )
 TIMEOUT = 8
 VERSION_RE = re.compile(rb'^VERSION\s*=\s*"([^"]+)"', re.M)
+TAG_RE = re.compile(r"^v?\d{4}\.\d{2}\.\d{2}-\d+$")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -45,14 +46,15 @@ def latest_tag() -> str | None:
         import json
 
         versions = json.loads(data).get("versions") or []
-        tags = [v.get("version", "") for v in versions if v.get("version")]
         best = None
-        for tag in tags:
-            parsed = tuple(
-                int(c) if c.isdigit() else 0
-                for c in re.split(r"[.\-]", tag.lstrip("vV"))
-            )
-            if parsed and (best is None or parsed > best[1]):
+        for entry in versions:
+            tag = entry.get("version", "")
+            # 只认 2026.09.01-6 这种严格格式，避免老式标签（如 20260901）
+            # 被解析成一个巨大的数字而永远"最新"。
+            if not TAG_RE.match(tag):
+                continue
+            parsed = tuple(int(c) for c in re.split(r"[.\-]", tag.lstrip("vV")))
+            if best is None or parsed > best[1]:
                 best = (tag, parsed)
         return best[0] if best else None
     except Exception:
