@@ -7,6 +7,7 @@ import csv
 import hashlib
 import json
 import logging
+import os
 import random
 import re
 import sys
@@ -22,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
-VERSION = "2026.09.01-8"
+VERSION = "2026.09.01-9"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / config.OUTPUT_DIR_NAME
@@ -634,6 +635,23 @@ async def pick_live_page(browser: Any) -> Any | None:
             if fallback is None and config.CHAT_URL_FRAGMENT.casefold() in url:
                 fallback = candidate
     return fallback
+
+
+
+async def log_all_pages(browser: Any, logger: logging.Logger) -> None:
+    """把 Playwright 看到的每个页面及其存活状态写进日志，便于远程判断
+    到底是"没看到页面"还是"看到了但全是幽灵"。"""
+    total = 0
+    for ci, context in enumerate(browser.contexts):
+        for pi, page in enumerate(context.pages):
+            total += 1
+            try:
+                url = page.url
+            except Exception:
+                url = "(读取失败)"
+            alive = await is_page_alive(page)
+            logger.info("Playwright 可见页面 ctx%s/p%s alive=%s url=%s", ci, pi, alive, url)
+    logger.info("Playwright 共看到 %s 个页面", total)
 
 
 async def acquire_page(browser: Any, logger: logging.Logger) -> Any | None:
@@ -1275,12 +1293,19 @@ async def run(logger: logging.Logger, paths: dict[str, Path]) -> int:
         logger.exception("导入 Playwright 失败")
         return 1
 
+    # 关键：绝不使用 async with async_playwright()。
+    # 退出该上下文时 Playwright 会对 CDP 连接的浏览器执行关闭流程，把用户
+    # 正在用的 Brave 一起关掉——这就是"跑完一次就得重新点 1 重登"的原因
+    # （2026-09-01 实测）。这里手动 start()，且全程不调用 browser.close()/
+    # playwright.stop()，退出时靠进程结束自然断开 websocket，浏览器不受影响。
+    playwright = await async_playwright().start()
     try:
-        async with async_playwright() as playwright:
+        if True:
             browser = await playwright.chromium.connect_over_cdp(
                 config.CDP_ENDPOINT,
                 timeout=config.CDP_TIMEOUT_MS,
             )
+            await log_all_pages(browser, logger)
             page = await acquire_page(browser, logger)
             if page is None:
                 page = await find_target_page(browser)
@@ -1330,6 +1355,18 @@ async def run(logger: logging.Logger, paths: dict[str, Path]) -> int:
         return 1
 
 
+def hard_exit(code: int) -> None:
+    """直接结束进程，跳过一切退出清理。
+
+    普通退出会触发 Playwright 的 atexit 清理，那会对 CDP 连接的浏览器发关闭
+    命令，把用户的 Brave 关掉（2026-09-01 实测）。这里用 os._exit 绕开。
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    logging.shutdown()
+    os._exit(code)
+
+
 def main() -> int:
     paths = ensure_output_dirs()
     logger = setup_logger()
@@ -1348,4 +1385,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    hard_exit(main())
