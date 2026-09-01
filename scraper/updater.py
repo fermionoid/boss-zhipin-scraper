@@ -89,7 +89,21 @@ def pick_freshest() -> tuple[str, tuple[int, ...]] | None:
     """
     best: tuple[str, tuple[int, ...]] | None = None
 
-    # 首选：不可变的标签引用，绕开分支缓存。
+    # 首选：直接向前探测标签地址。
+    # jsDelivr 的标签"列表"接口同样有缓存（实测只认到几个版本前），但
+    # 具体某个标签的文件地址是不可变引用、永不过期。所以从本地版本往后
+    # 逐个试 -N+1、-N+2……谁能取到就说明有新版，彻底不依赖任何列表。
+    here = local_version()
+    if len(here) == 4:
+        y, m, d, n = here
+        for step in range(1, 12):
+            probe = f"{y:04d}.{m:02d}.{d:02d}-{n + step}"
+            url = "https://cdn.jsdelivr.net/gh/{repo}@" + probe + "/{path}"
+            data = get(url.format(repo=REPO, path="scraper/main.py"))
+            version = version_of(data) if data else ()
+            if version and (best is None or version > best[1]):
+                best = (url, version)
+
     tag = latest_tag()
     if tag:
         tagged = "https://cdn.jsdelivr.net/gh/{repo}@" + tag + "/{path}"
