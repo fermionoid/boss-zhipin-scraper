@@ -31,6 +31,34 @@ VERSION_RE = re.compile(rb'^VERSION\s*=\s*"([^"]+)"', re.M)
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def latest_tag() -> str | None:
+    """查 jsDelivr 的数据 API 拿最新发布标签。
+
+    为什么必须用标签：jsDelivr 对 @main 这种分支引用的缓存刷不掉——即使调用
+    purge 接口返回成功，边缘节点仍会持续吐旧版几十分钟（2026-09-01 实测）。
+    而 @<tag> 是不可变引用，首次请求即回源，永远拿到对的内容。
+    """
+    data = get("https://data.jsdelivr.com/v1/packages/gh/" + REPO)
+    if not data:
+        return None
+    try:
+        import json
+
+        versions = json.loads(data).get("versions") or []
+        tags = [v.get("version", "") for v in versions if v.get("version")]
+        best = None
+        for tag in tags:
+            parsed = tuple(
+                int(c) if c.isdigit() else 0
+                for c in re.split(r"[.\-]", tag.lstrip("vV"))
+            )
+            if parsed and (best is None or parsed > best[1]):
+                best = (tag, parsed)
+        return best[0] if best else None
+    except Exception:
+        return None
+
+
 def get(url: str) -> bytes | None:
     try:
         with urllib.request.urlopen(url, timeout=TIMEOUT) as response:
@@ -57,6 +85,16 @@ def pick_freshest() -> tuple[str, tuple[int, ...]] | None:
     文件覆盖回去（2026-09-01 踩过）。
     """
     best: tuple[str, tuple[int, ...]] | None = None
+
+    # 首选：不可变的标签引用，绕开分支缓存。
+    tag = latest_tag()
+    if tag:
+        tagged = "https://cdn.jsdelivr.net/gh/{repo}@" + tag + "/{path}"
+        data = get(tagged.format(repo=REPO, path="scraper/main.py"))
+        version = version_of(data) if data else ()
+        if version:
+            best = (tagged, version)
+
     for mirror in MIRRORS:
         data = get(mirror.format(repo=REPO, path="scraper/main.py"))
         if data is None:
