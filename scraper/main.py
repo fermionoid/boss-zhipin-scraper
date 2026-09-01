@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
-VERSION = "2026.09.01-6"
+VERSION = "2026.09.01-7"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / config.OUTPUT_DIR_NAME
@@ -556,6 +556,8 @@ async def wait_for_list_with_help(
     曾经的"自动关弹窗""自动点沟通菜单"都会触发整页跳转，把用户刚切好的
     页面又踢回推荐页，形成用户点一次、脚本踢一次的死循环。
     """
+    global CURRENT_ACTION
+    CURRENT_ACTION = "纯等待列表出现（不碰页面）"
     container = await find_conversation_list(page)
     if container is not None:
         return container
@@ -841,6 +843,8 @@ async def process_item(
     previous_panel, _ = await candidate_panel_state(page, previous_right)
     previous_text = await locator_raw_text(previous_panel) if previous_panel is not None else ""
 
+    global CURRENT_ACTION
+    CURRENT_ACTION = f"点击候选人条目：{item.get('name', '?')}"
     target = None
     if container is not None:
         target = await locate_item(container, item)
@@ -855,6 +859,7 @@ async def process_item(
             await target.evaluate("el => el.click()")
         except Exception:
             return "vanished", None
+    CURRENT_ACTION = f"等待右侧面板渲染：{item.get('name', '?')}"
     state = await wait_for_candidate_render(page, previous_text)
 
     right = state["right"]
@@ -919,6 +924,7 @@ async def process_item(
     raw_path = paths["raw"] / f"{file_stem}.txt"
     screenshot_path = paths["screenshots"] / f"{file_stem}.png"
     raw_path.write_text(panel_text, encoding="utf-8")
+    CURRENT_ACTION = f"整页截图：{item.get('name', '?')}"
     await page.screenshot(path=str(screenshot_path), full_page=True)
     row["截图文件名"] = screenshot_path.name
     row["_key"] = item["key"]
@@ -1193,6 +1199,33 @@ async def find_target_page(browser: Any) -> Any | None:
     return domain_pages[0] if domain_pages else None
 
 
+CURRENT_ACTION = "启动"
+
+
+async def url_watchdog(page: Any, logger: logging.Logger) -> None:
+    """每秒记录一次网址，一变就写日志并标明脚本当时在干什么。
+
+    用来判定"页面自己跳到推荐页"到底是脚本造成的，还是 Boss 主动踢的：
+    如果跳转发生时 CURRENT_ACTION 是"纯等待"，那就与脚本无关。
+    """
+    last = None
+    while True:
+        try:
+            if page.is_closed():
+                logger.error("监视器：页面已被关闭！当时脚本在做：%s", CURRENT_ACTION)
+                return
+            now = page.url
+            if last is not None and now != last:
+                logger.warning(
+                    "监视器：网址变了 %s -> %s（当时脚本在做：%s）", last, now, CURRENT_ACTION
+                )
+            last = now
+        except Exception:
+            logger.exception("监视器：读取网址失败（当时：%s）", CURRENT_ACTION)
+            return
+        await asyncio.sleep(1)
+
+
 async def run(logger: logging.Logger, paths: dict[str, Path]) -> int:
     try:
         from playwright.async_api import async_playwright
@@ -1211,6 +1244,9 @@ async def run(logger: logging.Logger, paths: dict[str, Path]) -> int:
             if page is None:
                 print("未找到 Boss 直聘页面，请先双击 1、登录并打开沟通页面。")
                 return 2
+
+            logger.info("已连接 CDP，当前 url=%s", page.url)
+            watcher = asyncio.create_task(url_watchdog(page, logger))
 
             await wait_for_manual_security_check(page, logger)
             # 不再自动跳转：任何 goto 都会整页刷新，把页面踢回推荐页。
