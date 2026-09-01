@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
-VERSION = "2026.09.01-12"
+VERSION = "2026.09.01-13"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / config.OUTPUT_DIR_NAME
@@ -1393,13 +1393,36 @@ def hard_exit(code: int) -> None:
     os._exit(code)
 
 
+async def run_and_exit(logger: logging.Logger, paths: dict[str, Path]) -> int:
+    """在事件循环内部就结束进程。
+
+    关键：asyncio.run() 结束时会关闭事件循环，这一步会断开 Playwright 的
+    驱动进程，而驱动退出时会关掉它连过的浏览器——用户的 Brave 就是这么被
+    关掉的（2026-09-01 实测："跑一会儿之后浏览器没了"）。
+    所以必须在循环还活着、驱动还连着的时候直接 os._exit，让清理根本没机会跑。
+    """
+    code = 0
+    try:
+        code = await run(logger, paths)
+    except KeyboardInterrupt:
+        logger.info("用户中断抓取")
+        print("已中断；进度已经保存，下次运行会继续。")
+        code = 130
+    except BaseException:
+        logger.error("异常退出\n%s", traceback.format_exc())
+        print("程序异常，详细信息已写入 输出/log.txt。")
+        code = 1
+    hard_exit(code)
+    return code
+
+
 def main() -> int:
     paths = ensure_output_dirs()
     logger = setup_logger()
     print(f"程序版本：{VERSION}")
     logger.info("程序版本 %s", VERSION)
     try:
-        return asyncio.run(run(logger, paths))
+        return asyncio.run(run_and_exit(logger, paths))
     except KeyboardInterrupt:
         logger.info("用户中断抓取")
         print("已中断；进度已经保存，下次运行会继续。")
