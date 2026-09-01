@@ -60,6 +60,11 @@ NO_LIST_RETRY_WAIT = 3.0
 # 永远卡在"加载中"白屏（2026-09-01 实测）。列表消失且 URL 命中它时，
 # 脚本会主动 goto 回 CHAT_URL 拉回沟通页。
 RECOMMEND_FRAGMENT = "/web/chat/recommend"
+# NAV_CHAT_TEXTS：左侧「沟通」菜单的文字，用于 JS 强制点击切回聊天视图。
+NAV_CHAT_TEXTS = ("沟通", "消息")
+# HELP_POLL_SECONDS：请用户手动点「沟通」后，多久检查一次列表是否出现。
+HELP_POLL_SECONDS = 3.0
+
 # POPUP_DISMISS_TEXTS：新手引导/弹窗上的关闭按钮文字。全新 browser_profile
 # 首次登录会弹"意向沟通"等引导层，盖住右侧面板导致点击/读取全部失败
 # （2026-09-01 实测）。脚本每轮会尝试点掉文字精确命中的可见按钮。

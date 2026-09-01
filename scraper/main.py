@@ -22,6 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
+VERSION = "2026.09.01-4"
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / config.OUTPUT_DIR_NAME
 PROGRESS_PATH = OUTPUT_DIR / "progress.json"
@@ -563,6 +565,79 @@ async def dismiss_popups(page: Any, logger: logging.Logger) -> int:
 
 
 
+async def force_click_nav_chat(page: Any, logger: logging.Logger) -> bool:
+    """用 JS 直接派发点击切到聊天视图。
+
+    不能用 Playwright 的 click：它会等元素"稳定"，在这个页面上会一直等到
+    超时（2026-09-01 实测）。这里直接在 DOM 上 click()，不做可交互性检查。
+    """
+    try:
+        return bool(
+            await page.evaluate(
+                """(texts) => {
+                    const nodes = Array.from(document.querySelectorAll('a,span,div,li'));
+                    for (const t of texts) {
+                        const hit = nodes.find(el =>
+                            (el.innerText || '').trim() === t && el.offsetParent !== null);
+                        if (hit) { hit.click(); return true; }
+                    }
+                    return false;
+                }""",
+                list(config.NAV_CHAT_TEXTS),
+            )
+        )
+    except Exception:
+        logger.exception("JS 点击「沟通」失败")
+        return False
+
+
+async def wait_for_list_with_help(
+    page: Any, logger: logging.Logger, browser: Any = None
+) -> Any | None:
+    """先自救，自救不成就请用户点一下「沟通」，然后一直等到列表出现。
+
+    绝不因为"找不到列表"直接失败退出——用户就在电脑前，等他点一下即可。
+    """
+    container = await find_conversation_list(page)
+    if container is not None:
+        return container
+
+    for _ in range(config.NO_LIST_RETRY):
+        await dismiss_popups(page, logger)
+        await force_click_nav_chat(page, logger)
+        await asyncio.sleep(config.NO_LIST_RETRY_WAIT)
+        container = await find_conversation_list(page)
+        if container is not None:
+            logger.info("自动切回聊天视图成功")
+            return container
+
+    print("\n" + "=" * 52)
+    print("  需要你帮个忙：请在浏览器里点左边的「沟通」")
+    print("  （就是有绿色数字那一项，点完这个窗口会自己继续）")
+    print("=" * 52 + "\n")
+    logger.warning("等待用户手动切到沟通页 url=%s", page.url)
+
+    waited = 0.0
+    while True:
+        await asyncio.sleep(config.HELP_POLL_SECONDS)
+        waited += config.HELP_POLL_SECONDS
+        await dismiss_popups(page, logger)
+        container = await find_conversation_list(page)
+        if container is not None:
+            print("看到会话列表了，继续抓取。\n")
+            logger.info("用户已切回沟通页，继续")
+            return container
+        if browser is not None:
+            repicked = await pick_live_page(browser)
+            if repicked is not None and repicked is not page:
+                container = await find_conversation_list(repicked)
+                if container is not None:
+                    print("看到会话列表了，继续抓取。\n")
+                    return container
+        if waited % 60 < config.HELP_POLL_SECONDS:
+            print(f"  仍在等待……请在浏览器点左侧「沟通」（已等 {int(waited)} 秒）")
+
+
 async def pick_live_page(browser: Any) -> Any | None:
     """按内容挑选真正渲染了会话列表的页面。
     浏览器里可能存在 URL 相同但永远卡在加载中的僵尸/预加载目标
@@ -981,30 +1056,12 @@ async def scrape_page(
             break
 
         await dismiss_popups(page, logger)
-        container = await find_conversation_list(page)
-        if container is None:
-            # 列表暂时消失就安静地等它自己回来。
-            # 实测结论（2026-09-01）：goto 刷新会把页面重置、点「沟通」菜单
-            # 回不到聊天视图，两者都只会让情况更糟，一律不再使用。
-            for _ in range(config.NO_LIST_RETRY):
-                await asyncio.sleep(config.NO_LIST_RETRY_WAIT)
-                await dismiss_popups(page, logger)
-                container = await find_conversation_list(page)
-                if container is not None:
-                    break
-                if browser is not None:
-                    repicked = await pick_live_page(browser)
-                    if repicked is not None and repicked is not page:
-                        print("检测到会话列表在另一个页面，已自动切换。")
-                        logger.warning("切换抓取目标页 url=%s", repicked.url)
-                        page = repicked
-                        container = await find_conversation_list(page)
-                        if container is not None:
-                            break
+        # 找不到列表就自救 + 请用户点一下「沟通」，一直等到列表回来，绝不退出。
+        container = await wait_for_list_with_help(page, logger, browser)
         if container is None:
             await dump_debug_page(page, paths, logger, tag="no_list")
             raise ConversationListNotFoundError(
-                "无法定位会话列表（没有通过时间戳校验的容器），请把 输出/debug 文件夹发给交付人员"
+                "无法定位会话列表，请把 输出/debug 文件夹发给交付人员"
             )
         visible_items = await collect_visible_items(container)
         if not visible_items:
@@ -1221,6 +1278,11 @@ async def run(logger: logging.Logger, paths: dict[str, Path]) -> int:
             await wait_for_page_ready(page, logger)
             await dismiss_popups(page, logger)
             await wait_for_manual_security_check(page, logger)
+            # 开跑前先确保拿到列表（必要时请用户点「沟通」），避免空转失败。
+            if await wait_for_list_with_help(page, logger, browser) is None:
+                await dump_debug_page(page, paths, logger, tag="no_list")
+                print("始终没有看到会话列表，请把 输出\\debug 文件夹发给交付人员。")
+                return 3
             await dump_debug_page(page, paths, logger, browser=browser)
             print("已连接浏览器，开始抓取。请勿操作该浏览器窗口。")
             await scrape_page(page, logger, paths, browser=browser)
@@ -1238,6 +1300,8 @@ async def run(logger: logging.Logger, paths: dict[str, Path]) -> int:
 def main() -> int:
     paths = ensure_output_dirs()
     logger = setup_logger()
+    print(f"程序版本：{VERSION}")
+    logger.info("程序版本 %s", VERSION)
     try:
         return asyncio.run(run(logger, paths))
     except KeyboardInterrupt:
