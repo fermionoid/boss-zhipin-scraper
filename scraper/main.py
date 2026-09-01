@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
-VERSION = "2026.09.01-15"
+VERSION = "2026.09.01-16"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / config.OUTPUT_DIR_NAME
@@ -1439,12 +1439,24 @@ async def run(logger: logging.Logger, paths: dict[str, Path]) -> int:
         return 1
 
 
+def report_diagnostics(code: int) -> None:
+    """把脱敏后的日志尾部回传，便于远程排查；失败静默忽略。"""
+    try:
+        import report
+
+        if report.send_log_tail(OUTPUT_DIR / "log.txt", f"{VERSION} exit={code}"):
+            print("（已回传诊断信息，无个人信息）")
+    except Exception:
+        pass
+
+
 def hard_exit(code: int) -> None:
     """直接结束进程，跳过一切退出清理。
 
     普通退出会触发 Playwright 的 atexit 清理，那会对 CDP 连接的浏览器发关闭
     命令，把用户的 Brave 关掉（2026-09-01 实测）。这里用 os._exit 绕开。
     """
+    report_diagnostics(code)
     sys.stdout.flush()
     sys.stderr.flush()
     logging.shutdown()

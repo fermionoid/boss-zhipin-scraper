@@ -15,7 +15,7 @@ from pathlib import Path
 
 REPO = "fermionoid/boss-zhipin-scraper"
 FILES = ("scraper/main.py", "scraper/config.py", "scraper/diagnose.py",
-         "scraper/updater.py", "scraper/probe.py")
+         "scraper/updater.py", "scraper/probe.py", "scraper/report.py")
 # 国内可直连的镜像前缀。注意：jsDelivr 的 @main 会缓存很久，即使已经 purge
 # 也可能继续吐旧版（2026-09-01 实测卡了十几分钟），所以绝不能"谁先响应用谁"，
 # 必须比较各镜像的 VERSION，取最新的那个（见 pick_freshest）。
