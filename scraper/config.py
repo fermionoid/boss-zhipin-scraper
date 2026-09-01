@@ -8,7 +8,9 @@
 MAX_ITEMS = 0
 
 # CDP_ENDPOINT：浏览器远程调试地址，通常无需修改。
-CDP_ENDPOINT = "http://localhost:9222"
+# 必须写 127.0.0.1 而不是 localhost：localhost 会先解析成 IPv6 ::1，而
+# Brave/Chrome 的调试端口只监听 IPv4，导致 ECONNREFUSED ::1:9222（实测）。
+CDP_ENDPOINT = "http://127.0.0.1:9222"
 # TARGET_DOMAIN：用于从已打开标签页中识别 Boss 直聘页面。
 TARGET_DOMAIN = "zhipin.com"
 # CHAT_URL_FRAGMENT：用于确认当前位于“沟通”模块。
@@ -53,6 +55,11 @@ NAVIGATION_RECOVERY_TIMEOUT_SECONDS = 10.0
 PAGE_READY_TIMEOUT_SECONDS = 90.0
 # PAGE_READY_POLL_SECONDS：等待页面就绪的轮询间隔秒数。
 PAGE_READY_POLL_SECONDS = 2.0
+# PAGE_ACQUIRE_RETRY / PAGE_ACQUIRE_WAIT：锁定稳定页面的重试次数与确认间隔。
+# 用于排除 Chromium 预渲染的幽灵标签页（连上后瞬间被销毁）。
+PAGE_ACQUIRE_RETRY = 8
+PAGE_ACQUIRE_WAIT = 1.5
+
 # NO_LIST_RETRY / NO_LIST_RETRY_WAIT：抓取中途会话列表暂时消失时的重试次数与间隔秒数。
 NO_LIST_RETRY = 5
 NO_LIST_RETRY_WAIT = 3.0

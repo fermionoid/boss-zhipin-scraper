@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
-VERSION = "2026.09.01-7"
+VERSION = "2026.09.01-8"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / config.OUTPUT_DIR_NAME
@@ -594,15 +594,37 @@ async def wait_for_list_with_help(
             print(f"  仍在等待……请在浏览器点左侧「沟通」（已等 {int(waited)} 秒）")
 
 
+async def is_page_alive(page: Any) -> bool:
+    """判断这个页面对象是不是真的活着。
+
+    Chromium 会预渲染隐藏标签页，Playwright 连上时可能优先抓到那种幽灵目标，
+    而浏览器随后立刻把它丢弃——表现为连上 30 毫秒后 page 就被关闭
+    （2026-09-01 实测）。所以必须真正执行一次 JS 来确认它还在。
+    """
+    try:
+        if page.is_closed():
+            return False
+        return bool(await page.evaluate("() => true"))
+    except Exception:
+        return False
+
+
 async def pick_live_page(browser: Any) -> Any | None:
-    """按内容挑选真正渲染了会话列表的页面。
-    浏览器里可能存在 URL 相同但永远卡在加载中的僵尸/预加载目标
-    （2026-09-01 实测），按 URL 挑会挑错，必须按内容。"""
+    """挑出真正活着、且渲染了会话列表的页面。
+
+    顺序：先确认存活（排除预渲染幽灵页），再看有没有会话列表，最后才退而
+    求其次按 URL 匹配。
+    """
     fallback = None
     for context in browser.contexts:
         for candidate in context.pages:
-            url = candidate.url.casefold()
+            try:
+                url = candidate.url.casefold()
+            except Exception:
+                continue
             if config.TARGET_DOMAIN.casefold() not in url:
+                continue
+            if not await is_page_alive(candidate):
                 continue
             try:
                 if await find_conversation_list(candidate) is not None:
@@ -612,6 +634,25 @@ async def pick_live_page(browser: Any) -> Any | None:
             if fallback is None and config.CHAT_URL_FRAGMENT.casefold() in url:
                 fallback = candidate
     return fallback
+
+
+async def acquire_page(browser: Any, logger: logging.Logger) -> Any | None:
+    """反复扫描直到拿到一个稳定存活的页面。
+
+    预渲染目标会在连接后短时间内被销毁，所以拿到后要停一下再确认一次，
+    确认还活着才交出去；否则重新扫描。
+    """
+    for attempt in range(config.PAGE_ACQUIRE_RETRY):
+        page = await pick_live_page(browser)
+        if page is None:
+            await asyncio.sleep(config.PAGE_ACQUIRE_WAIT)
+            continue
+        await asyncio.sleep(config.PAGE_ACQUIRE_WAIT)
+        if await is_page_alive(page):
+            logger.info("已锁定稳定页面 url=%s（第 %s 次尝试）", page.url, attempt + 1)
+            return page
+        logger.warning("第 %s 次拿到的是瞬时页面（已消失），重新扫描", attempt + 1)
+    return None
 
 
 async def wait_for_page_ready(page: Any, logger: logging.Logger) -> bool:
@@ -1240,9 +1281,12 @@ async def run(logger: logging.Logger, paths: dict[str, Path]) -> int:
                 config.CDP_ENDPOINT,
                 timeout=config.CDP_TIMEOUT_MS,
             )
-            page = await pick_live_page(browser) or await find_target_page(browser)
+            page = await acquire_page(browser, logger)
             if page is None:
-                print("未找到 Boss 直聘页面，请先双击 1、登录并打开沟通页面。")
+                page = await find_target_page(browser)
+            if page is None or not await is_page_alive(page):
+                print("没找到稳定的 Boss 页面。请确认浏览器停在沟通页后重试。")
+                logger.error("未能锁定稳定页面")
                 return 2
 
             logger.info("已连接 CDP，当前 url=%s", page.url)
@@ -1260,8 +1304,22 @@ async def run(logger: logging.Logger, paths: dict[str, Path]) -> int:
                 return 3
             await dump_debug_page(page, paths, logger, browser=browser)
             print("已连接浏览器，开始抓取。请勿操作该浏览器窗口。")
-            await scrape_page(page, logger, paths, browser=browser)
-            return 0
+            # 页面可能中途被浏览器回收（预渲染目标被丢弃等），重新锁定一个再继续，
+            # 而不是直接崩溃退出——进度已存盘，重连后无缝接着抓。
+            for attempt in range(config.PAGE_ACQUIRE_RETRY):
+                try:
+                    await scrape_page(page, logger, paths, browser=browser)
+                    return 0
+                except RuntimeError as error:
+                    if "页面已关闭" not in str(error):
+                        raise
+                    logger.warning("页面失效，重新锁定后继续（第 %s 次）", attempt + 1)
+                    print("页面被浏览器回收了，正在重新连接……")
+                    page = await acquire_page(browser, logger)
+                    if page is None:
+                        break
+            print("多次重连仍失败，请把 输出\\log.txt 发给交付人员。")
+            return 4
     except ConversationListNotFoundError as error:
         logger.exception("会话列表定位失败")
         print(str(error))
