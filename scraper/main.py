@@ -543,6 +543,45 @@ async def find_conversation_list(page: Any) -> Any | None:
     return None
 
 
+async def dismiss_popups(page: Any, logger: logging.Logger) -> int:
+    """点掉新手引导/提示弹窗（文字精确命中才点，避免误点业务按钮）。"""
+    clicked = 0
+    for text in config.POPUP_DISMISS_TEXTS:
+        try:
+            candidates = page.locator(f'text="{text}"')
+            count = await candidates.count()
+            for index in range(min(count, 3)):
+                candidate = candidates.nth(index)
+                if await candidate.is_visible():
+                    await candidate.click(timeout=1500)
+                    clicked += 1
+                    logger.info("关闭弹窗：%s", text)
+                    await asyncio.sleep(0.3)
+        except Exception:
+            continue
+    return clicked
+
+
+async def pick_live_page(browser: Any) -> Any | None:
+    """按内容挑选真正渲染了会话列表的页面。
+    浏览器里可能存在 URL 相同但永远卡在加载中的僵尸/预加载目标
+    （2026-09-01 实测），按 URL 挑会挑错，必须按内容。"""
+    fallback = None
+    for context in browser.contexts:
+        for candidate in context.pages:
+            url = candidate.url.casefold()
+            if config.TARGET_DOMAIN.casefold() not in url:
+                continue
+            try:
+                if await find_conversation_list(candidate) is not None:
+                    return candidate
+            except Exception:
+                continue
+            if fallback is None and config.CHAT_URL_FRAGMENT.casefold() in url:
+                fallback = candidate
+    return fallback
+
+
 async def wait_for_page_ready(page: Any, logger: logging.Logger) -> bool:
     """等待 SPA 渲染出会话列表（首次加载可能要十几秒）。
     出现登录/验证关键词时提前返回 False，交给安全检查环节提示用户。"""
@@ -857,7 +896,12 @@ async def pause_after_item(handled: int) -> None:
     await asyncio.sleep(duration)
 
 
-async def scrape_page(page: Any, logger: logging.Logger, paths: dict[str, Path]) -> dict[str, Any]:
+async def scrape_page(
+    page: Any,
+    logger: logging.Logger,
+    paths: dict[str, Path],
+    browser: Any = None,
+) -> dict[str, Any]:
     progress = load_progress(logger)
     processed_keys = set(progress["processed"])
     failed_this_run: set[str] = set()
@@ -882,24 +926,40 @@ async def scrape_page(page: Any, logger: logging.Logger, paths: dict[str, Path])
             stopped_by_limit = True
             break
 
+        await dismiss_popups(page, logger)
         container = await find_conversation_list(page)
         if container is None:
-            # SPA 切换/刷新会让列表短暂消失，先重试几轮再判失败。
-            # 特例：Boss 会自己跳到 recommend 子页并卡死白屏，必须主动拉回。
-            for _ in range(config.NO_LIST_RETRY):
-                if config.RECOMMEND_FRAGMENT.casefold() in page.url.casefold():
-                    print("页面被 Boss 跳转到推荐子页，正在拉回沟通页……")
-                    logger.warning("检测到 recommend 卡死页，goto 拉回 url=%s", page.url)
+            # 列表暂时消失：先关弹窗、再全量重扫标签页（可能连错了僵尸目标），
+            # goto 拉回只作最后一搏——它会整页刷新，能不用就不用。
+            for attempt in range(config.NO_LIST_RETRY):
+                await dismiss_popups(page, logger)
+                container = await find_conversation_list(page)
+                if container is not None:
+                    break
+                if browser is not None:
+                    repicked = await pick_live_page(browser)
+                    if repicked is not None and repicked is not page:
+                        print("检测到会话列表在另一个页面，已自动切换。")
+                        logger.warning("切换抓取目标页 url=%s", repicked.url)
+                        page = repicked
+                        container = await find_conversation_list(page)
+                        if container is not None:
+                            break
+                if (
+                    attempt == config.NO_LIST_RETRY - 1
+                    and config.RECOMMEND_FRAGMENT.casefold() in page.url.casefold()
+                ):
+                    print("页面卡在推荐子页，尝试拉回沟通页……")
+                    logger.warning("最后一搏：goto 拉回 url=%s", page.url)
                     try:
                         await page.goto(config.CHAT_URL, timeout=config.GOTO_TIMEOUT_MS)
                     except Exception:
                         logger.exception("拉回沟通页失败")
                     await wait_for_page_ready(page, logger)
-                else:
-                    await asyncio.sleep(config.NO_LIST_RETRY_WAIT)
-                container = await find_conversation_list(page)
-                if container is not None:
-                    break
+                    container = await find_conversation_list(page)
+                    if container is not None:
+                        break
+                await asyncio.sleep(config.NO_LIST_RETRY_WAIT)
         if container is None:
             await dump_debug_page(page, paths, logger, tag="no_list")
             raise ConversationListNotFoundError(
@@ -1096,7 +1156,7 @@ async def run(logger: logging.Logger, paths: dict[str, Path]) -> int:
                 config.CDP_ENDPOINT,
                 timeout=config.CDP_TIMEOUT_MS,
             )
-            page = await find_target_page(browser)
+            page = await pick_live_page(browser) or await find_target_page(browser)
             if page is None:
                 print("未找到 Boss 直聘页面，请先双击 1、登录并打开沟通页面。")
                 return 2
@@ -1114,10 +1174,11 @@ async def run(logger: logging.Logger, paths: dict[str, Path]) -> int:
                 print("请先在浏览器打开 Boss 直聘“沟通”页面，再重新运行。")
                 return 2
             await wait_for_page_ready(page, logger)
+            await dismiss_popups(page, logger)
             await wait_for_manual_security_check(page, logger)
             await dump_debug_page(page, paths, logger, browser=browser)
             print("已连接浏览器，开始抓取。请勿操作该浏览器窗口。")
-            await scrape_page(page, logger, paths)
+            await scrape_page(page, logger, paths, browser=browser)
             return 0
     except ConversationListNotFoundError as error:
         logger.exception("会话列表定位失败")

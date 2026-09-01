@@ -60,6 +60,10 @@ NO_LIST_RETRY_WAIT = 3.0
 # 永远卡在"加载中"白屏（2026-09-01 实测）。列表消失且 URL 命中它时，
 # 脚本会主动 goto 回 CHAT_URL 拉回沟通页。
 RECOMMEND_FRAGMENT = "/web/chat/recommend"
+# POPUP_DISMISS_TEXTS：新手引导/弹窗上的关闭按钮文字。全新 browser_profile
+# 首次登录会弹"意向沟通"等引导层，盖住右侧面板导致点击/读取全部失败
+# （2026-09-01 实测）。脚本每轮会尝试点掉文字精确命中的可见按钮。
+POPUP_DISMISS_TEXTS = ("我知道了", "知道了", "跳过", "立即体验", "开始使用")
 
 # DEBUG_MAX_FAILURE_DUMPS：单次运行最多为失败会话生成几份诊断包（防止刷屏占盘）。
 DEBUG_MAX_FAILURE_DUMPS = 3
