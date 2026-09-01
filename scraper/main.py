@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
-VERSION = "2026.09.01-17"
+VERSION = "2026.09.01-18"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / config.OUTPUT_DIR_NAME
@@ -1492,7 +1492,7 @@ INSTALLER_URLS = (
     "https://fastly.jsdelivr.net/gh/fermionoid/boss-zhipin-scraper@{tag}/bookmarklet/install.html",
     "https://raw.githubusercontent.com/fermionoid/boss-zhipin-scraper/main/bookmarklet/install.html",
 )
-INSTALLER_TAG = "2026.09.01-17"
+INSTALLER_TAG = "2026.09.01-18"
 
 
 def open_installer(logger: logging.Logger) -> bool:
@@ -1538,11 +1538,31 @@ def open_installer(logger: logging.Logger) -> bool:
     print("")
     print("  以后都不用再双击这个 bat 了。")
     print("=" * 56)
-    try:
-        os.startfile(str(target))  # type: ignore[attr-defined]
-    except Exception:
-        logger.exception("自动打开失败")
-        print("  （没能自动打开，请手动双击本文件夹里的 收集器安装.html）")
+    # 必须用 Brave 打开：书签要加在登录着 Boss 的那个浏览器里才有用，
+    # 用系统默认浏览器（可能是 Chrome）打开等于白装。
+    candidates = [
+        os.path.expandvars(r"%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"),
+        os.path.expandvars(r"%ProgramFiles%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"),
+    ]
+    browser_exe = next((p for p in candidates if os.path.exists(p)), None)
+    opened = False
+    if browser_exe:
+        try:
+            import subprocess
+
+            subprocess.Popen([browser_exe, str(target)])
+            opened = True
+            print("  （已在 Brave 里打开，书签请加在 Brave 中）")
+        except Exception:
+            logger.exception("用 Brave 打开失败")
+    if not opened:
+        try:
+            os.startfile(str(target))  # type: ignore[attr-defined]
+            print("  （注意：如果打开的不是 Brave，请手动在 Brave 里按 Ctrl+O 打开这个文件）")
+        except Exception:
+            logger.exception("自动打开失败")
+            print("  （请手动在 Brave 里按 Ctrl+O 打开本文件夹的 收集器安装.html）")
     return True
 
 
