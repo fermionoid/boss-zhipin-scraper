@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
-VERSION = "2026.09.01-13"
+VERSION = "2026.09.01-14"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / config.OUTPUT_DIR_NAME
@@ -1335,9 +1335,9 @@ async def run(logger: logging.Logger, paths: dict[str, Path]) -> int:
             page = await acquire_page(browser, logger)
             if page is None:
                 page = await find_target_page(browser)
-            if page is None or not await is_page_alive(page):
-                print("没找到稳定的 Boss 页面。请确认浏览器停在沟通页后重试。")
-                logger.error("未能锁定稳定页面")
+            if page is None:
+                print("没找到 Boss 页面。请确认浏览器停在沟通页后重试。")
+                logger.error("未能找到任何 Boss 页面")
                 return 2
 
             logger.info("已连接 CDP，当前 url=%s", page.url)
