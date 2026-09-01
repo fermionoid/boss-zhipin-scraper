@@ -8,6 +8,8 @@
 (function () {
   "use strict";
 
+  var VER = "v20";
+
   if (window.__bossPicker) {
     window.__bossPicker.show();
     return;
@@ -91,6 +93,7 @@
   var seen = {};
   var stopped = false;
   var running = false;
+  var lastFail = "";
 
   try {
     var saved = JSON.parse(localStorage.getItem(CFG.storeKey) || "[]");
@@ -119,6 +122,7 @@
     '</div>' +
     '<div style="margin-top:8px;display:flex;gap:8px">' +
     '<button id="bp-csv" style="flex:1;padding:7px 0;border:1px solid #d8dde6;border-radius:6px;background:#fff;cursor:pointer">导出表格</button>' +
+    '<button id="bp-diag" style="padding:7px 10px;border:1px solid #d8dde6;border-radius:6px;background:#fff;cursor:pointer">诊断</button>' +
     '<button id="bp-clr" style="padding:7px 10px;border:1px solid #d8dde6;border-radius:6px;background:#fff;cursor:pointer">清空</button>' +
     '</div>';
   document.body.appendChild(box);
@@ -226,9 +230,25 @@
     var prev = panelText();
 
     el.scrollIntoView({ block: "center" });
-    el.click();
+    /* 点击处理函数挂在里层卡片上，点外层 [role=listitem] 可能不触发。
+       从里往外找一个可点的目标，并派发会冒泡的真实鼠标事件。 */
+    var target =
+      el.querySelector("[class*='geek-item']") ||
+      el.querySelector("[class*='figure']") ||
+      q(el, CFG.nameSel) ||
+      el;
+    ["mousedown", "mouseup", "click"].forEach(function (type) {
+      target.dispatchEvent(
+        new MouseEvent(type, { bubbles: true, cancelable: true, view: window })
+      );
+    });
     var t = await waitPanel(prev, name);
-    if (!t) return null;
+    if (!t || (name && t.indexOf(name) === -1)) {
+      lastFail =
+        "读取失败：面板里没出现『" + (name || "?") + "』｜面板字数 " +
+        (t || "").length + "｜开头：" + (t || "").slice(0, 60).replace(/\n/g, " ");
+      return null;
+    }
 
     var row = parsePanel(t);
     row["姓名"] = name || "";
@@ -264,8 +284,11 @@
             rows.push(row);
             save();
           }
-        } catch (err) {}
-        stat();
+        } catch (err) {
+          lastFail = "异常：" + (err && err.message ? err.message : String(err));
+        }
+        if (lastFail && !rows.length) say(lastFail);
+        else stat();
         await sleep(rndWait());
         continue;
       }
@@ -314,6 +337,23 @@
   box.querySelector("#bp-go").onclick = function () { loop(); };
   box.querySelector("#bp-stop").onclick = function () { stopped = true; say("已停止。已收集 " + rows.length + " 人。"); };
   box.querySelector("#bp-csv").onclick = download;
+  box.querySelector("#bp-diag").onclick = function () {
+    var list = listEl();
+    var its = items();
+    var first = its[0];
+    var pt = panelText();
+    var info =
+      VER +
+      " ｜列表容器:" + (list ? "有" : "无") +
+      " ｜可见条目:" + its.length +
+      " ｜首条姓名:" + (first ? txt(q(first, CFG.nameSel)) || "(空)" : "-") +
+      " ｜首条key:" + (first ? String(keyOf(first)).slice(0, 20) : "-") +
+      " ｜面板字数:" + pt.length +
+      " ｜面板开头:" + pt.slice(0, 80).replace(/\n/g, " ") +
+      " ｜上次失败:" + (lastFail || "无");
+    say(info);
+    try { navigator.clipboard.writeText(info); } catch (e) {}
+  };
   box.querySelector("#bp-clr").onclick = function () {
     if (!confirm("清空已收集的 " + rows.length + " 人？")) return;
     rows = []; seen = {}; save(); stat();
