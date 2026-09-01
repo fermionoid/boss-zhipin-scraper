@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
-VERSION = "2026.09.01-4"
+VERSION = "2026.09.01-5"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / config.OUTPUT_DIR_NAME
@@ -546,22 +546,48 @@ async def find_conversation_list(page: Any) -> Any | None:
 
 
 async def dismiss_popups(page: Any, logger: logging.Logger) -> int:
-    """点掉新手引导/提示弹窗（文字精确命中才点，避免误点业务按钮）。"""
-    clicked = 0
-    for text in config.POPUP_DISMISS_TEXTS:
-        try:
-            candidates = page.locator(f'text="{text}"')
-            count = await candidates.count()
-            for index in range(min(count, 3)):
-                candidate = candidates.nth(index)
-                if await candidate.is_visible():
-                    await candidate.click(timeout=1500)
-                    clicked += 1
-                    logger.info("关闭弹窗：%s", text)
-                    await asyncio.sleep(0.3)
-        except Exception:
-            continue
-    return clicked
+    """只点真正的"知道了"类关闭按钮，且必须位于弹窗容器内部。
+
+    血的教训（2026-09-01）：早期版本会点任何写着"立即体验""开始使用""跳过"
+    的元素，而 Boss 的推广横幅正是这些字——一点就跳去推荐页，页面就再也回不来。
+    因此：①文字白名单只保留纯关闭语义；②必须在 dialog/popup/guide 容器内；
+    ③点完立刻核对 URL，一旦被带走就大声记日志。
+    """
+    before_url = page.url
+    try:
+        clicked = await page.evaluate(
+            """(cfg) => {
+                const inPopup = (el) => {
+                    for (let n = el; n; n = n.parentElement) {
+                        const c = (n.className || '') + ' ' + (n.getAttribute?.('role') || '');
+                        if (typeof c === 'string' &&
+                            cfg.containerHints.some(h => c.toLowerCase().includes(h))) return true;
+                    }
+                    return false;
+                };
+                let n = 0;
+                for (const t of cfg.texts) {
+                    const hits = Array.from(document.querySelectorAll('span,div,button,a'))
+                        .filter(el => (el.innerText || '').trim() === t
+                                   && el.offsetParent !== null
+                                   && inPopup(el));
+                    for (const el of hits.slice(0, 2)) { el.click(); n++; }
+                }
+                return n;
+            }""",
+            {
+                "texts": list(config.POPUP_DISMISS_TEXTS),
+                "containerHints": list(config.POPUP_CONTAINER_HINTS),
+            },
+        )
+    except Exception:
+        return 0
+    if clicked:
+        await asyncio.sleep(0.3)
+        logger.info("关闭弹窗 %s 个", clicked)
+        if page.url != before_url:
+            logger.error("关闭弹窗后页面被带走！%s -> %s", before_url, page.url)
+    return int(clicked or 0)
 
 
 
