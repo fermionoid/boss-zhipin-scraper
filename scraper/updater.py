@@ -29,6 +29,8 @@ MIRRORS = (
 TIMEOUT = 8
 VERSION_RE = re.compile(rb'^VERSION\s*=\s*"([^"]+)"', re.M)
 TAG_RE = re.compile(r"^v?\d{4}\.\d{2}\.\d{2}-\d+$")
+# 教训：标签是不可变引用，CDN 会永久缓存其内容。
+# 发布新版必须打新标签，绝不能用 git tag -f 移动已推送的标签。
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
