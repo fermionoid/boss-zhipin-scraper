@@ -562,6 +562,24 @@ async def dismiss_popups(page: Any, logger: logging.Logger) -> int:
     return clicked
 
 
+async def click_nav_chat(page: Any, logger: logging.Logger) -> bool:
+    """像人一样点左侧「沟通」菜单，把 SPA 切回聊天视图。
+    绝不用 goto 刷新——刷新会让 Boss 重新落回推荐/引导视图（2026-09-01 实测）。"""
+    try:
+        candidates = page.locator('text="沟通"')
+        count = await candidates.count()
+        for index in range(min(count, 5)):
+            candidate = candidates.nth(index)
+            if await candidate.is_visible():
+                await candidate.click(timeout=2000)
+                logger.info("点击左侧「沟通」菜单恢复聊天视图")
+                await asyncio.sleep(1.5)
+                return True
+    except Exception:
+        logger.exception("点击「沟通」菜单失败")
+    return False
+
+
 async def pick_live_page(browser: Any) -> Any | None:
     """按内容挑选真正渲染了会话列表的页面。
     浏览器里可能存在 URL 相同但永远卡在加载中的僵尸/预加载目标
@@ -600,17 +618,11 @@ async def wait_for_page_ready(page: Any, logger: logging.Logger) -> bool:
         except Exception:
             pass
         polls += 1
-        # recommend 子页会永久卡在"加载中"，等是等不来的，隔几轮就主动拉回。
-        if (
-            polls % 5 == 0
-            and config.RECOMMEND_FRAGMENT.casefold() in page.url.casefold()
-        ):
-            print("页面被 Boss 跳转到推荐子页，正在拉回沟通页……")
-            logger.warning("等待期间检测到 recommend 卡死页，goto 拉回 url=%s", page.url)
-            try:
-                await page.goto(config.CHAT_URL, timeout=config.GOTO_TIMEOUT_MS)
-            except Exception:
-                logger.exception("拉回沟通页失败")
+        # 列表不在 = 大概率被切到了推荐视图；像人一样点「沟通」菜单切回来。
+        if polls % 3 == 0:
+            await dismiss_popups(page, logger)
+            if await click_nav_chat(page, logger):
+                print("已点击左侧「沟通」菜单，切回聊天视图……")
         if not announced:
             print("页面还在加载，等待中……（最长等 90 秒）")
             logger.info("等待沟通页渲染 url=%s", page.url)
@@ -933,6 +945,9 @@ async def scrape_page(
             # goto 拉回只作最后一搏——它会整页刷新，能不用就不用。
             for attempt in range(config.NO_LIST_RETRY):
                 await dismiss_popups(page, logger)
+                # 首选恢复手段：点左侧「沟通」菜单（SPA 内切换，不刷新页面）。
+                if await click_nav_chat(page, logger):
+                    print("视图被切走了，已点「沟通」菜单切回……")
                 container = await find_conversation_list(page)
                 if container is not None:
                     break
@@ -945,20 +960,6 @@ async def scrape_page(
                         container = await find_conversation_list(page)
                         if container is not None:
                             break
-                if (
-                    attempt == config.NO_LIST_RETRY - 1
-                    and config.RECOMMEND_FRAGMENT.casefold() in page.url.casefold()
-                ):
-                    print("页面卡在推荐子页，尝试拉回沟通页……")
-                    logger.warning("最后一搏：goto 拉回 url=%s", page.url)
-                    try:
-                        await page.goto(config.CHAT_URL, timeout=config.GOTO_TIMEOUT_MS)
-                    except Exception:
-                        logger.exception("拉回沟通页失败")
-                    await wait_for_page_ready(page, logger)
-                    container = await find_conversation_list(page)
-                    if container is not None:
-                        break
                 await asyncio.sleep(config.NO_LIST_RETRY_WAIT)
         if container is None:
             await dump_debug_page(page, paths, logger, tag="no_list")
