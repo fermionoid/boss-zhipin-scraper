@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
-VERSION = "2026.09.01-11"
+VERSION = "2026.09.01-12"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / config.OUTPUT_DIR_NAME
@@ -605,9 +605,24 @@ async def is_page_alive(page: Any) -> bool:
     try:
         if page.is_closed():
             return False
-        return bool(await page.evaluate("() => true"))
     except Exception:
         return False
+    # 页面正在加载/导航时 evaluate 会短暂抛错，不能据此判死——重试一次，
+    # 再退一步用 title() 佐证（-8 版本判得太严，把好页面全毙了）。
+    for attempt in range(2):
+        try:
+            if bool(await page.evaluate("() => true")):
+                return True
+        except Exception:
+            pass
+        try:
+            await page.title()
+            return True
+        except Exception:
+            pass
+        if attempt == 0:
+            await asyncio.sleep(0.8)
+    return False
 
 
 async def pick_live_page(browser: Any) -> Any | None:
@@ -670,6 +685,17 @@ async def acquire_page(browser: Any, logger: logging.Logger) -> Any | None:
             logger.info("已锁定稳定页面 url=%s（第 %s 次尝试）", page.url, attempt + 1)
             return page
         logger.warning("第 %s 次拿到的是瞬时页面（已消失），重新扫描", attempt + 1)
+
+    # 兜底：宁可用一个存活性存疑的 Boss 页面，也不要直接失败退出。
+    for context in browser.contexts:
+        for candidate in context.pages:
+            try:
+                if config.TARGET_DOMAIN.casefold() in candidate.url.casefold():
+                    logger.warning("未能确认存活，兜底使用 url=%s", candidate.url)
+                    print("页面状态不确定，先试着用它继续……")
+                    return candidate
+            except Exception:
+                continue
     return None
 
 
