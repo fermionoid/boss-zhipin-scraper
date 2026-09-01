@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
-VERSION = "2026.09.01-5"
+VERSION = "2026.09.01-6"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / config.OUTPUT_DIR_NAME
@@ -545,101 +545,30 @@ async def find_conversation_list(page: Any) -> Any | None:
     return None
 
 
-async def dismiss_popups(page: Any, logger: logging.Logger) -> int:
-    """只点真正的"知道了"类关闭按钮，且必须位于弹窗容器内部。
-
-    血的教训（2026-09-01）：早期版本会点任何写着"立即体验""开始使用""跳过"
-    的元素，而 Boss 的推广横幅正是这些字——一点就跳去推荐页，页面就再也回不来。
-    因此：①文字白名单只保留纯关闭语义；②必须在 dialog/popup/guide 容器内；
-    ③点完立刻核对 URL，一旦被带走就大声记日志。
-    """
-    before_url = page.url
-    try:
-        clicked = await page.evaluate(
-            """(cfg) => {
-                const inPopup = (el) => {
-                    for (let n = el; n; n = n.parentElement) {
-                        const c = (n.className || '') + ' ' + (n.getAttribute?.('role') || '');
-                        if (typeof c === 'string' &&
-                            cfg.containerHints.some(h => c.toLowerCase().includes(h))) return true;
-                    }
-                    return false;
-                };
-                let n = 0;
-                for (const t of cfg.texts) {
-                    const hits = Array.from(document.querySelectorAll('span,div,button,a'))
-                        .filter(el => (el.innerText || '').trim() === t
-                                   && el.offsetParent !== null
-                                   && inPopup(el));
-                    for (const el of hits.slice(0, 2)) { el.click(); n++; }
-                }
-                return n;
-            }""",
-            {
-                "texts": list(config.POPUP_DISMISS_TEXTS),
-                "containerHints": list(config.POPUP_CONTAINER_HINTS),
-            },
-        )
-    except Exception:
-        return 0
-    if clicked:
-        await asyncio.sleep(0.3)
-        logger.info("关闭弹窗 %s 个", clicked)
-        if page.url != before_url:
-            logger.error("关闭弹窗后页面被带走！%s -> %s", before_url, page.url)
-    return int(clicked or 0)
-
-
-
-async def force_click_nav_chat(page: Any, logger: logging.Logger) -> bool:
-    """用 JS 直接派发点击切到聊天视图。
-
-    不能用 Playwright 的 click：它会等元素"稳定"，在这个页面上会一直等到
-    超时（2026-09-01 实测）。这里直接在 DOM 上 click()，不做可交互性检查。
-    """
-    try:
-        return bool(
-            await page.evaluate(
-                """(texts) => {
-                    const nodes = Array.from(document.querySelectorAll('a,span,div,li'));
-                    for (const t of texts) {
-                        const hit = nodes.find(el =>
-                            (el.innerText || '').trim() === t && el.offsetParent !== null);
-                        if (hit) { hit.click(); return true; }
-                    }
-                    return false;
-                }""",
-                list(config.NAV_CHAT_TEXTS),
-            )
-        )
-    except Exception:
-        logger.exception("JS 点击「沟通」失败")
-        return False
 
 
 async def wait_for_list_with_help(
     page: Any, logger: logging.Logger, browser: Any = None
 ) -> Any | None:
-    """先自救，自救不成就请用户点一下「沟通」，然后一直等到列表出现。
+    """纯被动等待列表出现，等到为止。
 
-    绝不因为"找不到列表"直接失败退出——用户就在电脑前，等他点一下即可。
+    铁律（2026-09-01 血泪）：脚本除了点候选人条目，绝不碰页面上任何东西。
+    曾经的"自动关弹窗""自动点沟通菜单"都会触发整页跳转，把用户刚切好的
+    页面又踢回推荐页，形成用户点一次、脚本踢一次的死循环。
     """
     container = await find_conversation_list(page)
     if container is not None:
         return container
 
     for _ in range(config.NO_LIST_RETRY):
-        await dismiss_popups(page, logger)
-        await force_click_nav_chat(page, logger)
         await asyncio.sleep(config.NO_LIST_RETRY_WAIT)
         container = await find_conversation_list(page)
         if container is not None:
-            logger.info("自动切回聊天视图成功")
             return container
 
     print("\n" + "=" * 52)
     print("  需要你帮个忙：请在浏览器里点左边的「沟通」")
-    print("  （就是有绿色数字那一项，点完这个窗口会自己继续）")
+    print("  （点完这个窗口会自己继续，程序不会再动你的页面）")
     print("=" * 52 + "\n")
     logger.warning("等待用户手动切到沟通页 url=%s", page.url)
 
@@ -647,7 +576,6 @@ async def wait_for_list_with_help(
     while True:
         await asyncio.sleep(config.HELP_POLL_SECONDS)
         waited += config.HELP_POLL_SECONDS
-        await dismiss_popups(page, logger)
         container = await find_conversation_list(page)
         if container is not None:
             print("看到会话列表了，继续抓取。\n")
@@ -702,10 +630,6 @@ async def wait_for_page_ready(page: Any, logger: logging.Logger) -> bool:
         except Exception:
             pass
         polls += 1
-        # 只关弹窗、安静等待。实测点「沟通」菜单和 goto 刷新都回不到聊天视图，
-        # 反而会打断页面自己的恢复过程。
-        if polls % 3 == 0:
-            await dismiss_popups(page, logger)
         if not announced:
             print("页面还在加载，等待中……（最长等 90 秒）")
             logger.info("等待沟通页渲染 url=%s", page.url)
@@ -1081,7 +1005,6 @@ async def scrape_page(
             stopped_by_limit = True
             break
 
-        await dismiss_popups(page, logger)
         # 找不到列表就自救 + 请用户点一下「沟通」，一直等到列表回来，绝不退出。
         container = await wait_for_list_with_help(page, logger, browser)
         if container is None:
@@ -1290,19 +1213,9 @@ async def run(logger: logging.Logger, paths: dict[str, Path]) -> int:
                 return 2
 
             await wait_for_manual_security_check(page, logger)
-            if config.CHAT_URL_FRAGMENT.casefold() not in page.url.casefold():
-                print("当前不在沟通页面，正在自动跳转……")
-                logger.info("自动跳转沟通页，当前 url=%s", page.url)
-                try:
-                    await page.goto(config.CHAT_URL, timeout=config.GOTO_TIMEOUT_MS)
-                except Exception:
-                    logger.exception("跳转沟通页失败")
-                await wait_for_manual_security_check(page, logger)
-            if config.CHAT_URL_FRAGMENT.casefold() not in page.url.casefold():
-                print("请先在浏览器打开 Boss 直聘“沟通”页面，再重新运行。")
-                return 2
+            # 不再自动跳转：任何 goto 都会整页刷新，把页面踢回推荐页。
+            # 不在沟通页就直接告诉用户，由用户自己点。
             await wait_for_page_ready(page, logger)
-            await dismiss_popups(page, logger)
             await wait_for_manual_security_check(page, logger)
             # 开跑前先确保拿到列表（必要时请用户点「沟通」），避免空转失败。
             if await wait_for_list_with_help(page, logger, browser) is None:
