@@ -8,7 +8,7 @@
 (function () {
   "use strict";
 
-  var VER = "v22";
+  var VER = "v23";
 
   if (window.__bossPicker) {
     window.__bossPicker.show();
@@ -235,25 +235,65 @@
     return panelText();
   }
 
+
+  function fireMouse(target, type, x, y) {
+    var opts = {
+      bubbles: true, cancelable: true, view: window,
+      clientX: x, clientY: y, button: 0, buttons: type === "mousedown" ? 1 : 0,
+    };
+    try {
+      target.dispatchEvent(
+        type.indexOf("pointer") === 0
+          ? new PointerEvent(type, Object.assign({ pointerId: 1, isPrimary: true }, opts))
+          : new MouseEvent(type, opts)
+      );
+    } catch (e) {}
+  }
+
+  function clickLikeUser(el) {
+    /* 只 dispatch 一个不带坐标的 click 是不够的——很多前端框架在
+       pointerdown/mousedown 阶段就决定切换，且会读事件坐标。
+       所以按真实鼠标的完整序列来，并且点"该点上真正最顶层的那个元素"。 */
+    var rect = el.getBoundingClientRect();
+    if (!rect.width || !rect.height) return false;
+    var x = Math.round(rect.left + rect.width / 2);
+    var y = Math.round(rect.top + rect.height / 2);
+
+    var target = document.elementFromPoint(x, y);
+    if (!target || !el.contains(target)) target = el;
+
+    ["pointerover", "mouseover", "pointermove", "mousemove",
+     "pointerdown", "mousedown", "pointerup", "mouseup", "click"]
+      .forEach(function (type) { fireMouse(target, type, x, y); });
+
+    try { target.click(); } catch (e) {}
+    return true;
+  }
+
   async function grabOne(el) {
+    var myKey = keyOf(el);
     var name = txt(q(el, CFG.nameSel));
     var job = txt(q(el, CFG.jobSel));
     var time = txt(q(el, CFG.timeSel));
     var prev = panelText();
 
     el.scrollIntoView({ block: "center" });
-    /* 点击处理函数挂在里层卡片上，点外层 [role=listitem] 可能不触发。
-       从里往外找一个可点的目标，并派发会冒泡的真实鼠标事件。 */
-    var target =
-      el.querySelector("[class*='geek-item']") ||
-      el.querySelector("[class*='figure']") ||
-      q(el, CFG.nameSel) ||
-      el;
-    ["mousedown", "mouseup", "click"].forEach(function (type) {
-      target.dispatchEvent(
-        new MouseEvent(type, { bubbles: true, cancelable: true, view: window })
-      );
-    });
+    await sleep(350);
+
+    /* 虚拟列表会回收 DOM 节点：滚动之后手里这个元素可能已经换人了，
+       必须按 key 重新定位一次再点（2026-09-02 数据串行的成因之一）。 */
+    var fresh = null;
+    var all = items();
+    for (var ai = 0; ai < all.length; ai++) {
+      if (keyOf(all[ai]) === myKey) { fresh = all[ai]; break; }
+    }
+    if (fresh) el = fresh;
+
+    if (!clickLikeUser(el)) {
+      lastFail = "点不动：" + (name || "?");
+      return null;
+    }
+
     /* 等这一条真的变成"选中"，说明页面确实切过去了 */
     var t0 = Date.now();
     while (Date.now() - t0 < 3000) {
