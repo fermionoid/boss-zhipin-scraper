@@ -8,7 +8,7 @@
 (function () {
   "use strict";
 
-  var VER = "v20";
+  var VER = "v22";
 
   if (window.__bossPicker) {
     window.__bossPicker.show();
@@ -94,6 +94,7 @@
   var stopped = false;
   var running = false;
   var lastFail = "";
+  var lastFingerprint = "";
 
   try {
     var saved = JSON.parse(localStorage.getItem(CFG.storeKey) || "[]");
@@ -151,16 +152,27 @@
     );
   }
 
-  function panelText() {
-    var parts = [];
+  function panelRoot() {
+    /* 关键：容器绝不能包含左侧会话列表。
+       之前取得太宽，把整页都圈了进去，导致每个人都解析到同一段文字——
+       CSV 里姓名在变、其余字段全同，就是这个 bug（2026-09-02）。 */
+    var list = listEl();
     for (var i = 0; i < CFG.panelSel.length; i++) {
       var els = document.querySelectorAll(CFG.panelSel[i]);
-      for (var j = 0; j < els.length && j < 3; j++) {
-        var t = (els[j].innerText || "").trim();
-        if (t && parts.indexOf(t) === -1) parts.push(t);
+      for (var j = 0; j < els.length; j++) {
+        var el = els[j];
+        if (el.offsetParent === null) continue;
+        if (list && (el.contains(list) || el === list)) continue;
+        if ((el.innerText || "").trim().length < 10) continue;
+        return el;
       }
     }
-    return parts.join("\n");
+    return null;
+  }
+
+  function panelText() {
+    var root = panelRoot();
+    return root ? (root.innerText || "").trim() : "";
   }
 
   function parsePanel(t) {
@@ -242,6 +254,15 @@
         new MouseEvent(type, { bubbles: true, cancelable: true, view: window })
       );
     });
+    /* 等这一条真的变成"选中"，说明页面确实切过去了 */
+    var t0 = Date.now();
+    while (Date.now() - t0 < 3000) {
+      var cls = (el.getAttribute("class") || "") + " " +
+                ((el.firstElementChild && el.firstElementChild.getAttribute("class")) || "");
+      if (/selected|active|current/i.test(cls)) break;
+      await sleep(150);
+    }
+
     var t = await waitPanel(prev, name);
     if (!t || (name && t.indexOf(name) === -1)) {
       lastFail =
@@ -251,6 +272,19 @@
     }
 
     var row = parsePanel(t);
+    /* 指纹相同 = 右侧根本没换人，宁可记失败也不写错数据 */
+    var fp = [row["年龄"], row["学校"], row["最近公司"], row["期望薪资"], row["专业"]].join("|");
+    if (fp !== "||||" && fp === lastFingerprint) {
+      await sleep(1200);
+      t = panelText();
+      row = parsePanel(t);
+      fp = [row["年龄"], row["学校"], row["最近公司"], row["期望薪资"], row["专业"]].join("|");
+      if (fp === lastFingerprint) {
+        lastFail = "跳过 " + name + "：右侧详情没有切换（与上一个人完全相同）";
+        return null;
+      }
+    }
+    lastFingerprint = fp;
     row["姓名"] = name || "";
     row["沟通职位"] = row["沟通职位"] || job;
     row["最后消息时间"] = time;
