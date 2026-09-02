@@ -8,7 +8,7 @@
 (function () {
   "use strict";
 
-  var VER = "v23";
+  var VER = "v24";
 
   if (window.__bossPicker) {
     window.__bossPicker.show();
@@ -31,8 +31,14 @@
       "[class*='geek-card']",
       "[class*='resume']",
     ],
-    minWait: 1200,
-    maxWait: 2600,
+    /* 三档速度。默认「慢」——被平台标记过之后，宁可慢也不要再触发。
+       长休是 Python 版就有的机制，移植成书签时漏掉了，导致连续不断点击。 */
+    speeds: {
+      slow:   { min: 5000, max: 9000, every: 20, restMin: 120000, restMax: 300000, label: "慢速（推荐）" },
+      normal: { min: 3000, max: 6000, every: 30, restMin: 60000,  restMax: 150000, label: "中速" },
+      fast:   { min: 1500, max: 3000, every: 40, restMin: 30000,  restMax: 60000,  label: "快速（易被限制）" },
+    },
+    speedKey: "bossPickerSpeed",
     renderTimeout: 8000,
     scrollPause: 1200,
     scrollTries: 6,
@@ -84,8 +90,44 @@
   function sleep(ms) {
     return new Promise(function (r) { setTimeout(r, ms); });
   }
+  function prof() { return CFG.speeds[speed]; }
+
   function rndWait() {
-    return CFG.minWait + Math.random() * (CFG.maxWait - CFG.minWait);
+    var p = prof();
+    return (p.min + Math.random() * (p.max - p.min)) * slowFactor;
+  }
+
+  function noteResult(ok) {
+    /* 自适应：连续失败就成倍放慢并延长休息；连续成功再慢慢恢复。
+       让脚本自己贴合这个站点当下的容忍度，不用人去猜数字。 */
+    if (ok) {
+      failStreak = 0;
+      okStreak++;
+      if (okStreak >= 12 && slowFactor > 1) {
+        slowFactor = Math.max(1, slowFactor / 1.5);
+        okStreak = 0;
+      }
+    } else {
+      okStreak = 0;
+      failStreak++;
+      if (failStreak >= 2) {
+        slowFactor = Math.min(8, slowFactor * 2);
+        failStreak = 0;
+        return true;   /* 需要立刻长休 */
+      }
+    }
+    return false;
+  }
+
+  async function longRest(reason) {
+    var p = prof();
+    var ms = (p.restMin + Math.random() * (p.restMax - p.restMin)) * slowFactor;
+    var until = Date.now() + ms;
+    while (Date.now() < until && !stopped) {
+      var left = Math.ceil((until - Date.now()) / 1000);
+      say(reason + "，休息 " + left + " 秒（已收集 " + rows.length + " 人）");
+      await sleep(1000);
+    }
   }
 
   /* ---------- 状态 ---------- */
@@ -95,6 +137,13 @@
   var running = false;
   var lastFail = "";
   var lastFingerprint = "";
+  var speed = "slow";
+  try { speed = localStorage.getItem(CFG.speedKey) || "slow"; } catch (e) {}
+  if (!CFG.speeds[speed]) speed = "slow";
+  var slowFactor = 1;      /* 自适应退避倍数 */
+  var okStreak = 0;
+  var failStreak = 0;
+  var restCounter = 0;
 
   try {
     var saved = JSON.parse(localStorage.getItem(CFG.storeKey) || "[]");
@@ -121,6 +170,10 @@
     '<button id="bp-go" style="flex:1;padding:7px 0;border:0;border-radius:6px;background:#00bebd;color:#fff;font-weight:600;cursor:pointer">开始</button>' +
     '<button id="bp-stop" style="flex:1;padding:7px 0;border:1px solid #d8dde6;border-radius:6px;background:#fff;cursor:pointer">停止</button>' +
     '</div>' +
+    '<div style="margin-top:10px;display:flex;align-items:center;gap:8px">' +
+    '<span style="color:#8b97a6;font-size:12px;white-space:nowrap">速度</span>' +
+    '<select id="bp-speed" style="flex:1;padding:5px;border:1px solid #d8dde6;border-radius:6px;background:#fff;font-size:12px"></select>' +
+    '</div>' +
     '<div style="margin-top:8px;display:flex;gap:8px">' +
     '<button id="bp-csv" style="flex:1;padding:7px 0;border:1px solid #d8dde6;border-radius:6px;background:#fff;cursor:pointer">导出表格</button>' +
     '<button id="bp-diag" style="padding:7px 10px;border:1px solid #d8dde6;border-radius:6px;background:#fff;cursor:pointer">诊断</button>' +
@@ -128,10 +181,31 @@
     '</div>';
   document.body.appendChild(box);
 
+  var speedEl = box.querySelector("#bp-speed");
+  Object.keys(CFG.speeds).forEach(function (k) {
+    var o = document.createElement("option");
+    o.value = k;
+    o.textContent = CFG.speeds[k].label;
+    if (k === speed) o.selected = true;
+    speedEl.appendChild(o);
+  });
+  speedEl.onchange = function () {
+    speed = speedEl.value;
+    slowFactor = 1;
+    try { localStorage.setItem(CFG.speedKey, speed); } catch (e) {}
+    stat();
+  };
+
   var msgEl = box.querySelector("#bp-msg");
   function say(s) { msgEl.textContent = s; }
   function stat() {
-    say("已收集 " + rows.length + " 人" + (running ? "，正在继续……" : "。"));
+    var p = prof();
+    var per = ((p.min + p.max) / 2 / 1000) * slowFactor;
+    var tempo = per.toFixed(0) + " 秒/人" + (slowFactor > 1 ? "（已自动放慢 " + slowFactor + " 倍）" : "");
+    say(
+      "已收集 " + rows.length + " 人" + (running ? "，正在继续……" : "。") +
+      "\n节奏：" + tempo
+    );
   }
   stat();
 
@@ -361,9 +435,18 @@
         } catch (err) {
           lastFail = "异常：" + (err && err.message ? err.message : String(err));
         }
-        if (lastFail && !rows.length) say(lastFail);
+        var gotOne = !!(row && row["姓名"]);
+        var needRest = noteResult(gotOne);
+        if (lastFail && !gotOne) say(lastFail);
         else stat();
-        await sleep(rndWait());
+
+        if (needRest) {
+          await longRest("连续失败，自动放慢");
+        } else if (gotOne && ++restCounter % prof().every === 0) {
+          await longRest("已抓 " + rows.length + " 人，例行休息");
+        } else {
+          await sleep(rndWait());
+        }
         continue;
       }
 

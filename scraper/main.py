@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
 
-VERSION = "2026.09.02-23"
+VERSION = "2026.09.02-24"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / config.OUTPUT_DIR_NAME
@@ -1492,7 +1492,7 @@ INSTALLER_URLS = (
     "https://fastly.jsdelivr.net/gh/fermionoid/boss-zhipin-scraper@{tag}/bookmarklet/install.html",
     "https://raw.githubusercontent.com/fermionoid/boss-zhipin-scraper/main/bookmarklet/install.html",
 )
-INSTALLER_TAG = "2026.09.02-23"
+INSTALLER_TAG = "2026.09.02-24"
 
 
 
